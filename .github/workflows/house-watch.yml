@@ -1,0 +1,65 @@
+# Runs the house watch bot every 15 minutes.
+# The bot itself drops to once an hour from 12am to 5am Central.
+name: House Watch
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}        # the "Run workflow" button, for testing
+
+permissions:
+  contents: write              # only used by the keep-alive step at the bottom
+
+concurrency:
+  group: house-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # What the bot saw last time lives in the Actions cache, not in the repo,
+      # so nothing about the house is ever committed.
+      - name: Restore last check
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: house-watch-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: house-watch-state-
+
+      - name: Check listing sites
+        env:
+          HOUSE_ADDRESS: ${{ secrets.HOUSE_ADDRESS }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python house_watch.py --once
+
+      - name: Save this check
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: house-watch-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # GitHub switches off scheduled workflows after 60 days with no repo activity.
+      # If the last commit is older than 45 days, make a tiny one.
+      - name: Keep the schedule alive
+        run: |
+          last=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - last )) -gt $(( 45 * 86400 )) ]; then
+            date -u +%F > .keepalive
+            git config user.name "house-watch-bot"
+            git config user.email "house-watch-bot@users.noreply.github.com"
+            git add .keepalive
+            git commit -m "Keep scheduled checks alive"
+            git push
+          fi
